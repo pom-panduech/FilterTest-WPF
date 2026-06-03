@@ -1,0 +1,46 @@
+<Window x:Class="ModbusChart.Views.ScaleDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Height="200" Width="340"
+        Background="{StaticResource BrBgDark}"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" x:Name="TbTitle" FontSize="13" FontWeight="SemiBold"
+                   Foreground="{StaticResource BrTextPrimary}" Margin="0,0,0,16"/>
+
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="60"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Min" VerticalAlignment="Center"
+                       Foreground="{StaticResource BrTextSecondary}" FontSize="11"/>
+            <TextBox Grid.Column="1" x:Name="TbMin"/>
+        </Grid>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="60"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Max" VerticalAlignment="Center"
+                       Foreground="{StaticResource BrTextSecondary}" FontSize="11"/>
+            <TextBox Grid.Column="1" x:Name="TbMax"/>
+        </Grid>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Cancel" Width="70" Height="28" Margin="0,0,8,0" Click="Cancel_Click"/>
+            <Button Content="OK" Style="{StaticResource AccentButton}" Width="70" Height="28" Click="Ok_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
