@@ -20,8 +20,12 @@ public class MainViewModel : ViewModelBase, IDisposable
     private double _elapsedSeconds;
     private bool _isReading;
     private readonly Dictionary<string, string> _lastNotified = new();
-    private StreamWriter? _csvWriter;
-    private string _csvPath = "";
+
+    // ─── Raw data storage (all points, aligned by tick index) ────────────
+    private const int MaxDisplayPoints = 1500;
+    private readonly Dictionary<LftChannelId, List<DataPoint>> _rawData;
+    private readonly List<(double Elapsed, string DateTimeStr)> _rawTicks = new();
+    private int _decimationRatio = 1;
 
     // ─── Crosshair tracker ────────────────────────────────────────────────
     private bool _trackerVisible;
@@ -83,11 +87,10 @@ public class MainViewModel : ViewModelBase, IDisposable
             return "Not Recording";
         }
     }
-    public bool CanStop       => IsRunning;
+    public bool CanStop => IsRunning;
 
     private bool _hasData;
     public bool HasData { get => _hasData; private set => SetField(ref _hasData, value); }
-
 
     // ─── Legend items (for chart legend bar) ──────────────────────────────
     public ObservableCollection<LegendItem> LegendItems { get; } = new();
@@ -148,24 +151,18 @@ public class MainViewModel : ViewModelBase, IDisposable
     private string _pigmentWeight = "";
     private string _totalWeight = "";
 
-    public string FileName
-    {
-        get => _fileName;
-        set => SetField(ref _fileName, value);
-    }
-
-    public string CsvPath => _csvPath;
-    public string SampleId              { get => _sampleId;              set => SetField(ref _sampleId, value); }
-    public string BasePolymer           { get => _basePolymer;           set => SetField(ref _basePolymer, value); }
-    public string Customer              { get => _customer;              set => SetField(ref _customer, value); }
-    public string Date                  { get => _date;                  set => SetField(ref _date, value); }
-    public string Operator              { get => _operator;              set => SetField(ref _operator, value); }
-    public string FilterScreenSize      { get => _filterScreenSize;      set => SetField(ref _filterScreenSize, value); }
-    public string FeedRate              { get => _feedRate;              set => SetField(ref _feedRate, value); }
-    public string PressureGearPumpInlet { get => _pressureGearPumpInlet; set => SetField(ref _pressureGearPumpInlet, value); }
-    public string FiltertestUnitTemp    { get => _filtertestUnitTemp;    set => SetField(ref _filtertestUnitTemp, value); }
-    public string PigmentWeight         { get => _pigmentWeight;         set => SetField(ref _pigmentWeight, value); }
-    public string TotalWeight           { get => _totalWeight;           set => SetField(ref _totalWeight, value); }
+    public string FileName               { get => _fileName;              set => SetField(ref _fileName, value); }
+    public string SampleId               { get => _sampleId;              set => SetField(ref _sampleId, value); }
+    public string BasePolymer            { get => _basePolymer;           set => SetField(ref _basePolymer, value); }
+    public string Customer               { get => _customer;              set => SetField(ref _customer, value); }
+    public string Date                   { get => _date;                  set => SetField(ref _date, value); }
+    public string Operator               { get => _operator;              set => SetField(ref _operator, value); }
+    public string FilterScreenSize       { get => _filterScreenSize;      set => SetField(ref _filterScreenSize, value); }
+    public string FeedRate               { get => _feedRate;              set => SetField(ref _feedRate, value); }
+    public string PressureGearPumpInlet  { get => _pressureGearPumpInlet; set => SetField(ref _pressureGearPumpInlet, value); }
+    public string FiltertestUnitTemp     { get => _filtertestUnitTemp;    set => SetField(ref _filtertestUnitTemp, value); }
+    public string PigmentWeight          { get => _pigmentWeight;         set => SetField(ref _pigmentWeight, value); }
+    public string TotalWeight            { get => _totalWeight;           set => SetField(ref _totalWeight, value); }
 
     public AppSettings Settings => _settings;
 
@@ -188,8 +185,8 @@ public class MainViewModel : ViewModelBase, IDisposable
         _settings = SettingsService.Load();
         _channelMeta = BuildChannelMeta();
 
-        _state = Enum.GetValues<LftChannelId>()
-            .ToDictionary(id => id, _ => new ChannelState());
+        _state   = Enum.GetValues<LftChannelId>().ToDictionary(id => id, _ => new ChannelState());
+        _rawData = Enum.GetValues<LftChannelId>().ToDictionary(id => id, _ => new List<DataPoint>());
         _calc = new FilterTestCalculator(_state);
 
         InitializePlot();
@@ -281,11 +278,6 @@ public class MainViewModel : ViewModelBase, IDisposable
 
     public void RebuildSeries()
     {
-        // Save existing points before rebuild
-        var saved = _seriesMap.ToDictionary(
-            kvp => kvp.Key,
-            kvp => kvp.Value.Points.ToList());
-
         PlotModel.Series.Clear();
         _seriesMap.Clear();
         LegendItems.Clear();
@@ -309,17 +301,40 @@ public class MainViewModel : ViewModelBase, IDisposable
 
             PlotModel.Series.Add(series);
             _seriesMap[id] = series;
-
             LegendItems.Add(new LegendItem(meta.Label.Trim(), cfg.Color, cfg.ShowInGraph));
         }
 
-        // Restore existing points
-        foreach (var (id, points) in saved)
-            if (_seriesMap.TryGetValue(id, out var s))
-                foreach (var pt in points)
-                    s.Points.Add(pt);
-
+        RebuildDisplayFromRaw();
         PlotModel.InvalidatePlot(false);
+    }
+
+    private void RebuildDisplayFromRaw()
+    {
+        foreach (var (id, raw) in _rawData)
+        {
+            if (!_seriesMap.TryGetValue(id, out var series)) continue;
+            series.Points.Clear();
+            if (raw.Count == 0) continue;
+
+            for (int i = 0; i < raw.Count; i += _decimationRatio)
+            {
+                var pt = raw[i];
+                if (!double.IsNaN(pt.Y))
+                    series.Points.Add(pt);
+            }
+
+            // Always include the last non-NaN point so chart tail is always current
+            for (int i = raw.Count - 1; i >= 0; i--)
+            {
+                if (!double.IsNaN(raw[i].Y))
+                {
+                    var last = raw[i];
+                    if (series.Points.Count == 0 || series.Points[series.Points.Count - 1].X < last.X)
+                        series.Points.Add(last);
+                    break;
+                }
+            }
+        }
     }
 
     // ─── Connect / Disconnect ─────────────────────────────────────────────
@@ -359,7 +374,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     }
 
     // ─── Start / Stop ─────────────────────────────────────────────────────
-    public async Task<bool> StartAsync(string csvPath)
+    public async Task<bool> StartAsync()
     {
         if (!IsConnected)
         {
@@ -367,32 +382,16 @@ public class MainViewModel : ViewModelBase, IDisposable
             if (!IsConnected) return false;
         }
 
-        // สร้าง CSV พร้อม header
-        try
-        {
-            _csvPath   = csvPath;
-            _csvWriter = new StreamWriter(csvPath, append: false, System.Text.Encoding.UTF8);
-            var ids = Enum.GetValues<LftChannelId>();
-            var header = "DateTime,Time(s)," + string.Join(",",
-                ids.Select(id => $"{id}({_channelMeta[id].Unit})"));
-            _csvWriter.WriteLine(header);
-            _csvWriter.Flush();
-        }
-        catch (Exception ex)
-        {
-            StatusText = $"CSV error: {ex.Message}";
-            return false;
-        }
-
         _elapsedSeconds = 0;
+        _decimationRatio = 1;
+        _rawTicks.Clear();
+        foreach (var raw in _rawData.Values) raw.Clear();
         UpdateTimeAxis();
-
         foreach (var s in _seriesMap.Values) s.Points.Clear();
         foreach (var st in _state.Values) st.Reset();
 
         MeltPressure = "—";
         MeltTemperature = "—";
-
         _isPaused = false;
         _recordingComplete = false;
         IsRunning = true;
@@ -411,62 +410,66 @@ public class MainViewModel : ViewModelBase, IDisposable
         _timer.Stop();
         _isPaused = false;
         IsRunning = false;
-
-        _csvWriter?.Flush();
-        _csvWriter?.Dispose();
-        _csvWriter = null;
-
-        PrependMetadataToCsv();
-
         OnPropertyChanged(nameof(CanPause));
         OnPropertyChanged(nameof(CanResume));
         OnPropertyChanged(nameof(RecordingStatusText));
-
         StatusText = IsConnected
             ? $"Stopped  |  {_settings.ModbusHost}:{_settings.ModbusPort}"
             : "Stopped";
     }
 
-    private void PrependMetadataToCsv()
+    // ─── Save to CSV (metadata + all raw data) ────────────────────────────
+    public void SaveToCsv(string filePath)
     {
-        if (string.IsNullOrEmpty(_csvPath) || !File.Exists(_csvPath)) return;
-        try
+        var ids = Enum.GetValues<LftChannelId>();
+        using var writer = new StreamWriter(filePath, append: false, System.Text.Encoding.UTF8);
+
+        // Metadata block
+        writer.WriteLine($"# SampleId: {SampleId}");
+        writer.WriteLine($"# BasePolymer: {BasePolymer}");
+        writer.WriteLine($"# Customer: {Customer}");
+        writer.WriteLine($"# Date: {Date}");
+        writer.WriteLine($"# Operator: {Operator}");
+        writer.WriteLine($"# FilterScreenSize: {FilterScreenSize}");
+        writer.WriteLine($"# FeedRate: {FeedRate}");
+        writer.WriteLine($"# PressureGearPumpInlet: {PressureGearPumpInlet}");
+        writer.WriteLine($"# FiltertestUnitTemp: {FiltertestUnitTemp}");
+        writer.WriteLine($"# PigmentWeight: {PigmentWeight}");
+        writer.WriteLine($"# TotalWeight: {TotalWeight}");
+        writer.WriteLine("# ---");
+        writer.WriteLine($"# P2_PStart: {P2_PStart}");
+        writer.WriteLine($"# P2_PMax: {P2_PMax}");
+        writer.WriteLine($"# P2_DeltaP: {P2_DeltaP}");
+        writer.WriteLine($"# P2_FPV: {P2_FPV}");
+        writer.WriteLine($"# P1_PStart: {P1_PStart}");
+        writer.WriteLine($"# P1_PEnd: {P1_PEnd}");
+        writer.WriteLine($"# V1_Speed: {V1_Speed}");
+        writer.WriteLine($"# I1_Amp: {I1_Amp}");
+        writer.WriteLine($"# T2_TStart: {T2_TStart}");
+        writer.WriteLine($"# T2_TEnd: {T2_TEnd}");
+        writer.WriteLine($"# T2_TMax: {T2_TMax}");
+        writer.WriteLine($"# T2_TAvg: {T2_TAvg}");
+        writer.WriteLine($"# T1_TStart: {T1_TStart}");
+        writer.WriteLine($"# T1_TEnd: {T1_TEnd}");
+        writer.WriteLine($"# V2_Speed: {V2_Speed}");
+        writer.WriteLine($"# I2_Amp: {I2_Amp}");
+
+        // Header row
+        writer.WriteLine("DateTime,Time(s)," + string.Join(",",
+            ids.Select(id => $"{id}({_channelMeta[id].Unit})")));
+
+        // Data rows — aligned by tick index
+        for (int i = 0; i < _rawTicks.Count; i++)
         {
-            var data = File.ReadAllLines(_csvPath, System.Text.Encoding.UTF8);
-            var meta = new[]
+            var (elapsed, dtStr) = _rawTicks[i];
+            var cols = ids.Select(id =>
             {
-                $"# SampleId: {SampleId}",
-                $"# BasePolymer: {BasePolymer}",
-                $"# Customer: {Customer}",
-                $"# Date: {Date}",
-                $"# Operator: {Operator}",
-                $"# FilterScreenSize: {FilterScreenSize}",
-                $"# FeedRate: {FeedRate}",
-                $"# PressureGearPumpInlet: {PressureGearPumpInlet}",
-                $"# FiltertestUnitTemp: {FiltertestUnitTemp}",
-                $"# PigmentWeight: {PigmentWeight}",
-                $"# TotalWeight: {TotalWeight}",
-                "# ---",
-                $"# P2_PStart: {P2_PStart}",
-                $"# P2_PMax: {P2_PMax}",
-                $"# P2_DeltaP: {P2_DeltaP}",
-                $"# P2_FPV: {P2_FPV}",
-                $"# P1_PStart: {P1_PStart}",
-                $"# P1_PEnd: {P1_PEnd}",
-                $"# V1_Speed: {V1_Speed}",
-                $"# I1_Amp: {I1_Amp}",
-                $"# T2_TStart: {T2_TStart}",
-                $"# T2_TEnd: {T2_TEnd}",
-                $"# T2_TMax: {T2_TMax}",
-                $"# T2_TAvg: {T2_TAvg}",
-                $"# T1_TStart: {T1_TStart}",
-                $"# T1_TEnd: {T1_TEnd}",
-                $"# V2_Speed: {V2_Speed}",
-                $"# I2_Amp: {I2_Amp}",
-            };
-            File.WriteAllLines(_csvPath, meta.Concat(data), System.Text.Encoding.UTF8);
+                if (i >= _rawData[id].Count) return "";
+                var v = _rawData[id][i].Y;
+                return double.IsNaN(v) ? "" : v.ToString("F4");
+            });
+            writer.WriteLine($"{dtStr},{elapsed:F1},{string.Join(",", cols)}");
         }
-        catch { }
     }
 
     public void PauseRecording()
@@ -503,6 +506,9 @@ public class MainViewModel : ViewModelBase, IDisposable
     public void ClearGraph()
     {
         _elapsedSeconds = 0;
+        _decimationRatio = 1;
+        _rawTicks.Clear();
+        foreach (var raw in _rawData.Values) raw.Clear();
         HasData = false;
         _isViewingCsv = false;
         EnableStart();
@@ -515,12 +521,14 @@ public class MainViewModel : ViewModelBase, IDisposable
         NotifyLeftPanel();
     }
 
-
     // ─── Load CSV ─────────────────────────────────────────────────────────
     public void LoadFromCsv(string path)
     {
         StopRecording();
 
+        _decimationRatio = 1;
+        _rawTicks.Clear();
+        foreach (var raw in _rawData.Values) raw.Clear();
         foreach (var s in _seriesMap.Values) s.Points.Clear();
         foreach (var st in _state.Values) st.Reset();
         _elapsedSeconds = 0;
@@ -528,11 +536,10 @@ public class MainViewModel : ViewModelBase, IDisposable
         var lines = File.ReadAllLines(path, System.Text.Encoding.UTF8);
         if (lines.Length < 2) { StatusText = "CSV: no data"; return; }
 
-        // ข้ามบรรทัด metadata (#) และหา header row
         var dataLines = lines.Where(l => !l.StartsWith("#")).ToArray();
         if (dataLines.Length < 2) { StatusText = "CSV: no data"; return; }
 
-        // โหลด metadata ลงใน form fields
+        // Load metadata into form fields
         foreach (var ml in lines.Where(l => l.StartsWith("#")))
         {
             var kv = ml.TrimStart('#').Trim().Split(':', 2);
@@ -562,7 +569,9 @@ public class MainViewModel : ViewModelBase, IDisposable
                 if (headers[i].StartsWith(id.ToString(), StringComparison.OrdinalIgnoreCase))
                 { colMap[i] = id; break; }
 
-        // Parse rows
+        var presentIds = new HashSet<LftChannelId>(colMap.Values);
+
+        // Parse data rows
         int loaded = 0;
         foreach (var line in dataLines.Skip(1))
         {
@@ -573,19 +582,32 @@ public class MainViewModel : ViewModelBase, IDisposable
                     System.Globalization.CultureInfo.InvariantCulture, out double t)) continue;
 
             _elapsedSeconds = Math.Max(_elapsedSeconds, t);
+            _rawTicks.Add((t, parts.Length > 0 ? parts[0] : ""));
 
             foreach (var (col, id) in colMap)
             {
-                if (col >= parts.Length) continue;
-                if (!double.TryParse(parts[col], System.Globalization.NumberStyles.Any,
-                        System.Globalization.CultureInfo.InvariantCulture, out double val)) continue;
-                if (_seriesMap.TryGetValue(id, out var series))
-                    series.Points.Add(new DataPoint(t, val));
-                if (_state.TryGetValue(id, out var st))
+                double val = double.NaN;
+                if (col < parts.Length && double.TryParse(parts[col],
+                        System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out double parsed))
+                    val = parsed;
+
+                _rawData[id].Add(new DataPoint(t, val));
+                if (!double.IsNaN(val) && _state.TryGetValue(id, out var st))
                     st.Record(val);
             }
+
+            // Fill NaN for channels not present in this CSV
+            foreach (var id in Enum.GetValues<LftChannelId>())
+                if (!presentIds.Contains(id))
+                    _rawData[id].Add(new DataPoint(t, double.NaN));
+
             loaded++;
         }
+
+        // Compute decimation ratio and rebuild display series
+        _decimationRatio = Math.Max(1, (int)Math.Ceiling(_rawTicks.Count / (double)MaxDisplayPoints));
+        RebuildDisplayFromRaw();
 
         UpdateTimeAxis();
         PlotModel.InvalidatePlot(true);
@@ -596,28 +618,8 @@ public class MainViewModel : ViewModelBase, IDisposable
         StatusText = $"Loaded: {Path.GetFileName(path)}  ({loaded:N0} rows)  |  Click New to start a new session";
     }
 
-    public void RenameCsvTo(string newName)
-    {
-        if (string.IsNullOrEmpty(_csvPath)) return;
-        var dir     = Path.GetDirectoryName(_csvPath) ?? "";
-        var newPath = Path.Combine(dir, newName + ".csv");
-        if (string.Equals(newPath, _csvPath, StringComparison.OrdinalIgnoreCase)) return;
-        try
-        {
-            // ถ้ากำลัง recording อยู่ → ปิด writer ก่อน แล้วเปิดใหม่หลัง rename
-            bool wasRecording = _csvWriter != null;
-            _csvWriter?.Flush();
-            _csvWriter?.Dispose();
-            _csvWriter = null;
-
-            File.Move(_csvPath, newPath, overwrite: true);
-            _csvPath = newPath;
-
-            if (wasRecording)
-                _csvWriter = new StreamWriter(_csvPath, append: true, System.Text.Encoding.UTF8);
-        }
-        catch (Exception ex) { StatusText = $"Rename failed: {ex.Message}"; }
-    }
+    // ─── Export CSV (alias for SaveToCsv) ─────────────────────────────────
+    public void ExportCsv(string filePath) => SaveToCsv(filePath);
 
     // ─── Crosshair ────────────────────────────────────────────────────────
     public void MoveCrosshair(double screenX, double screenY, double viewWidth, double viewHeight)
@@ -667,15 +669,35 @@ public class MainViewModel : ViewModelBase, IDisposable
 
             var readings = await Task.Run(() => _modbus.ReadAll(_settings.Channels));
 
+            // Compute decimation for this tick
+            int rawCount = _rawTicks.Count + 1;
+            int newDec = Math.Max(1, (int)Math.Ceiling(rawCount / (double)MaxDisplayPoints));
+            bool needRebuild = newDec != _decimationRatio;
+            if (needRebuild) _decimationRatio = newDec;
+            bool addSampleTick = rawCount % _decimationRatio == 0;
+
+            _rawTicks.Add((_elapsedSeconds, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
+
             int errorCount = 0;
             foreach (var (id, (value, hasError)) in readings)
             {
                 var st = _state[id];
-                if (hasError) { st.HasError = true; errorCount++; continue; }
-                st.Record(value);
-                if (_seriesMap.TryGetValue(id, out var series) && series.LineStyle != LineStyle.None)
-                    series.Points.Add(new DataPoint(_elapsedSeconds, value));
+                if (hasError) { st.HasError = true; errorCount++; }
+                else st.Record(value);
+
+                var pt = new DataPoint(_elapsedSeconds, hasError ? double.NaN : value);
+                _rawData[id].Add(pt);
+
+                if (!needRebuild && !hasError && _seriesMap.TryGetValue(id, out var series) && series.LineStyle != LineStyle.None)
+                {
+                    if (addSampleTick)
+                        series.Points.Add(pt);
+                    else if (series.Points.Count > 0)
+                        series.Points[series.Points.Count - 1] = pt; // update live tail
+                }
             }
+
+            if (needRebuild) RebuildDisplayFromRaw();
 
             if (errorCount == readings.Count)
             {
@@ -690,24 +712,9 @@ public class MainViewModel : ViewModelBase, IDisposable
                 StatusText = "Recording...";
 
             UpdateTimeAxis();
-
-            // เขียน CSV ทุก tick
-            if (_csvWriter != null)
-            {
-                var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                var cols = Enum.GetValues<LftChannelId>().Select(id =>
-                {
-                    if (!readings.TryGetValue(id, out var r) || r.HasError) return "";
-                    return r.Value.ToString("F4");
-                });
-                _csvWriter.WriteLine($"{now},{_elapsedSeconds:F1},{string.Join(",", cols)}");
-                _csvWriter.Flush();
-            }
-
             PlotModel.InvalidatePlot(false);
             NotifyLeftPanel();
 
-            // Update real-time bottom-form and melt values
             MeltPressure          = _calc.MeltPressure;
             MeltTemperature       = _calc.MeltTemperature;
             FeedRate              = _calc.FeedRate;
@@ -729,9 +736,8 @@ public class MainViewModel : ViewModelBase, IDisposable
     // ─── Settings ─────────────────────────────────────────────────────────
     public void ApplySettings(AppSettings newSettings)
     {
-        bool wasRunning  = IsRunning;
-        bool wasPaused   = _isPaused;
-        string savedPath = _csvPath;
+        bool wasRunning = IsRunning;
+        bool wasPaused  = _isPaused;
 
         if (wasRunning) StopRecording();
 
@@ -754,16 +760,8 @@ public class MainViewModel : ViewModelBase, IDisposable
         RebuildSeries();
         NotifyUnitLabels();
 
-        // Resume recording ถ้ากำลัง run อยู่ก่อน apply
-        if (wasRunning && !wasPaused && !string.IsNullOrEmpty(savedPath))
+        if (wasRunning && !wasPaused)
         {
-            try
-            {
-                _csvPath   = savedPath;
-                _csvWriter = new StreamWriter(savedPath, append: true, System.Text.Encoding.UTF8);
-            }
-            catch { }
-
             _isPaused = false;
             IsRunning = true;
             _timer.Start();
@@ -772,35 +770,6 @@ public class MainViewModel : ViewModelBase, IDisposable
             OnPropertyChanged(nameof(CanResume));
             OnPropertyChanged(nameof(RecordingStatusText));
         }
-    }
-
-    // ─── Export CSV ───────────────────────────────────────────────────────
-    public void ExportCsv(string filePath)
-    {
-        var lines = new List<string>();
-        var ids = Enum.GetValues<LftChannelId>().ToList();
-
-        lines.Add("Time(s)," + string.Join(",", ids.Select(id => $"{_channelMeta[id].Label.Trim()}({_channelMeta[id].Unit})")));
-
-        int maxPts = _seriesMap.Values.Max(s => s.Points.Count);
-        for (int i = 0; i < maxPts; i++)
-        {
-            double? time = null;
-            var parts = new List<string>();
-            foreach (var id in ids)
-            {
-                var pts = _seriesMap[id].Points;
-                if (i < pts.Count)
-                {
-                    time ??= pts[i].X;
-                    parts.Add(pts[i].Y.ToString("F4"));
-                }
-                else parts.Add("");
-            }
-            lines.Add($"{time:F2},{string.Join(",", parts)}");
-        }
-
-        System.IO.File.WriteAllLines(filePath, lines);
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────
@@ -823,12 +792,11 @@ public class MainViewModel : ViewModelBase, IDisposable
         NotifyIfChanged(nameof(V2_Speed),  V2_Speed);  NotifyIfChanged(nameof(I2_Amp),    I2_Amp);
     }
 
-private void UpdateTimeAxis()
+    private void UpdateTimeAxis()
     {
         _timeAxis.Minimum = 0;
         _timeAxis.Maximum = Math.Max(_elapsedSeconds * 1.02, 60);
 
-        // MajorStep adapts to elapsed time
         _timeAxis.MajorStep = _elapsedSeconds switch
         {
             < 120    => 10,
@@ -840,7 +808,6 @@ private void UpdateTimeAxis()
             _        => 7200
         };
 
-        // Label format adapts: s → mm:ss → hh:mm:ss
         _timeAxis.LabelFormatter = val =>
         {
             if (val < 0) return "";

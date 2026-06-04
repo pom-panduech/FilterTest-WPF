@@ -26,24 +26,7 @@ public partial class MainWindow : Window
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
         _csvSaved = false;
-        // ใช้ชื่อจาก File Name field ถ้ามี ไม่งั้น auto-generate
-        var suggested = string.IsNullOrWhiteSpace(_vm.FileName)
-            ? $"LFT_{DateTime.Now:yyyyMMdd_HHmmss}"
-            : _vm.FileName.Trim();
-
-        var dlg = new SaveFileDialog
-        {
-            Title      = "Save CSV Log File",
-            Filter     = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*",
-            DefaultExt = ".csv",
-            FileName   = suggested,
-        };
-        if (dlg.ShowDialog() != true) return;
-
-        // sync ชื่อไฟล์ (ไม่รวม extension) กลับไปที่ File Name field
-        _vm.FileName = System.IO.Path.GetFileNameWithoutExtension(dlg.FileName);
-
-        bool started = await _vm.StartAsync(dlg.FileName);
+        bool started = await _vm.StartAsync();
         if (!started)
             MessageBox.Show(
                 "Unable to connect to PLC.\nPlease check IP and Port in Settings.",
@@ -51,7 +34,14 @@ public partial class MainWindow : Window
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
     }
-    private void Stop_Click(object sender, RoutedEventArgs e)        { _vm.StopRecording(); _vm.Disconnect(); _vm.DisableStart(); }
+
+    private void Stop_Click(object sender, RoutedEventArgs e)
+    {
+        _vm.StopRecording();
+        _vm.Disconnect();
+        _vm.DisableStart();
+    }
+
     private void Pause_Click(object sender, RoutedEventArgs e)
     {
         _vm.PauseRecording();
@@ -60,15 +50,15 @@ public partial class MainWindow : Window
 
     private async void Resume_Click(object sender, RoutedEventArgs e) =>
         await _vm.ResumeRecording();
-    private void ClearGraph_Click(object sender, RoutedEventArgs e)  => _vm.ClearGraph();
+
+    private void ClearGraph_Click(object sender, RoutedEventArgs e) => _vm.ClearGraph();
     private void Exit_Click(object sender, RoutedEventArgs e)        => Close();
     private void New_Click(object sender, RoutedEventArgs e) =>
-        Process.Start(Process.GetCurrentProcess().MainModule!.FileName);
-
+        Process.Start(Environment.ProcessPath!);
 
     private void OpenCsv_Click(object sender, RoutedEventArgs e)
     {
-        var dlg = new Microsoft.Win32.OpenFileDialog
+        var dlg = new OpenFileDialog
         {
             Title      = "Open CSV Log File",
             Filter     = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*",
@@ -83,14 +73,55 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ExportCsv_Click(object sender, RoutedEventArgs e)
+    private void SaveAs_Click(object sender, RoutedEventArgs e)
     {
+        if (!_vm.HasData)
+        {
+            MessageBox.Show("No data to save. Please start recording first.",
+                "No Data", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var suggested = string.IsNullOrWhiteSpace(_vm.FileName)
+            ? $"LFT_{DateTime.Now:yyyyMMdd_HHmmss}"
+            : _vm.FileName.Trim();
+
         var dlg = new SaveFileDialog
         {
-            Title = "Export CSV",
-            Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*",
+            Title      = "Save CSV Log File",
+            Filter     = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*",
             DefaultExt = ".csv",
-            FileName = $"LFT_{DateTime.Now:yyyyMMdd_HHmmss}"
+            FileName   = suggested,
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            _vm.SaveToCsv(dlg.FileName);
+            _vm.FileName = System.IO.Path.GetFileNameWithoutExtension(dlg.FileName);
+            _csvSaved = true;
+            MessageBox.Show($"Saved to:\n{dlg.FileName}", "Save Complete",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Save failed:\n{ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void ExportCsv_Click(object sender, RoutedEventArgs e)
+    {
+        var suggested = string.IsNullOrWhiteSpace(_vm.FileName)
+            ? $"LFT_{DateTime.Now:yyyyMMdd_HHmmss}"
+            : _vm.FileName.Trim();
+
+        var dlg = new SaveFileDialog
+        {
+            Title      = "Export CSV",
+            Filter     = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*",
+            DefaultExt = ".csv",
+            FileName   = suggested,
         };
         if (dlg.ShowDialog() != true) return;
 
@@ -116,7 +147,6 @@ public partial class MainWindow : Window
             pos.X >= area.Left && pos.X <= area.Right &&
             pos.Y >= area.Top  && pos.Y <= area.Bottom)
         {
-            // WPF lines — instant, no chart re-render
             CrosshairV.X1 = CrosshairV.X2 = pos.X;
             CrosshairV.Y1 = area.Top;
             CrosshairV.Y2 = area.Bottom;
@@ -127,7 +157,6 @@ public partial class MainWindow : Window
             CrosshairH.X2 = area.Right;
             CrosshairH.Visibility = Visibility.Visible;
 
-            // Tooltip content (data lookup only)
             _vm.MoveCrosshair(pos.X, pos.Y, PlotView.ActualWidth, PlotView.ActualHeight);
         }
         else
@@ -143,46 +172,6 @@ public partial class MainWindow : Window
         CrosshairV.Visibility = Visibility.Collapsed;
         CrosshairH.Visibility = Visibility.Collapsed;
         _vm.HideCrosshair();
-    }
-
-    private void SaveAs_Click(object sender, RoutedEventArgs e)
-    {
-        if (string.IsNullOrEmpty(_vm.CsvPath))
-        {
-            MessageBox.Show("No CSV file found. Please click Start to begin recording first.",
-                "No File", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
-        var newName = string.IsNullOrWhiteSpace(_vm.FileName)
-            ? System.IO.Path.GetFileNameWithoutExtension(_vm.CsvPath)
-            : _vm.FileName.Trim();
-
-        var folder  = System.IO.Path.GetDirectoryName(_vm.CsvPath);
-        var oldName = System.IO.Path.GetFileNameWithoutExtension(_vm.CsvPath);
-
-        var result = MessageBox.Show(
-            $"Do you want to save all data to this file?\n\n" +
-            $"  {folder}\\{newName}.csv",
-            "Save CSV",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question);
-
-        if (result != MessageBoxResult.Yes) return;
-
-        try
-        {
-            _vm.RenameCsvTo(newName);
-            _vm.FileName = newName;
-            _vm.Disconnect();
-            _vm.DisableStart();
-            _csvSaved = true;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Cannot rename file:\n{ex.Message}", "Error",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
     }
 
     private void Window_DragOver(object sender, DragEventArgs e)
@@ -209,10 +198,10 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        if (!string.IsNullOrEmpty(_vm.CsvPath) && !_csvSaved)
+        if (_vm.HasData && !_csvSaved)
         {
             var result = MessageBox.Show(
-                $"Do you want to save all data to this file?\n\n  {_vm.CsvPath}",
+                "You have unsaved recording data.\nDo you want to save before closing?",
                 "Save CSV",
                 MessageBoxButton.YesNoCancel,
                 MessageBoxImage.Question);
@@ -221,11 +210,23 @@ public partial class MainWindow : Window
             { e.Cancel = true; return; }
 
             if (result == MessageBoxResult.Yes)
-                _vm.StopRecording(); // flush + close CSV writer
-            else // No → ลบไฟล์ทิ้ง
             {
-                _vm.StopRecording();
-                try { System.IO.File.Delete(_vm.CsvPath); } catch { }
+                var suggested = string.IsNullOrWhiteSpace(_vm.FileName)
+                    ? $"LFT_{DateTime.Now:yyyyMMdd_HHmmss}"
+                    : _vm.FileName.Trim();
+
+                var dlg = new SaveFileDialog
+                {
+                    Title      = "Save CSV Log File",
+                    Filter     = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*",
+                    DefaultExt = ".csv",
+                    FileName   = suggested,
+                };
+                if (dlg.ShowDialog() == true)
+                {
+                    try { _vm.SaveToCsv(dlg.FileName); }
+                    catch { }
+                }
             }
         }
         base.OnClosing(e);
